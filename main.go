@@ -179,10 +179,12 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /v1/auth/logout", a.protect(a.logout))
 	mux.HandleFunc("POST /v1/auth/refresh", a.protect(a.refresh))
 	mux.HandleFunc("POST /v1/auth/password-reset", a.handle(a.passwordReset))
+	mux.HandleFunc("POST /v1/auth/change-password", a.protectPending(a.changePassword))
 
 	mux.HandleFunc("GET /v1/users", a.requireRole([]string{roleAdmin}, a.listUsers))
 	mux.HandleFunc("POST /v1/users", a.requireRole([]string{roleAdmin}, a.createUser))
 	mux.HandleFunc("PATCH /v1/users/{id}", a.requireRole([]string{roleAdmin}, a.updateUser))
+	mux.HandleFunc("POST /v1/users/{id}/reset-password", a.requireRole([]string{roleAdmin}, a.resetUserPassword))
 
 	mux.HandleFunc("GET /v1/contacts", a.protect(a.listContacts))
 	mux.HandleFunc("POST /v1/contacts", a.protect(a.createContact))

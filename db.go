@@ -137,6 +137,10 @@ func migrate(db *sql.DB) error {
 	if err := ensureColumn(db, "users", "manager_id", "TEXT"); err != nil {
 		return err
 	}
+	// Set by an admin password reset; cleared when the user changes their password.
+	if err := ensureColumn(db, "users", "must_change_password", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	return nil
 }
 

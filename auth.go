@@ -40,6 +40,20 @@ type authUser struct {
 	// Scope lists the user ids whose records this caller may see. nil means
 	// unrestricted (admin). Filled in by buildScope on every request.
 	Scope []string
+	// MustChange is set after an admin reset; only change-password is allowed.
+	MustChange bool
+}
+
+// checkPassword enforces the password rules used everywhere a password is set.
+// bcrypt ignores bytes past 72, so longer input is rejected rather than truncated.
+func checkPassword(field, pw string) error {
+	if len(pw) < minPasswordLen {
+		return errValidation(field, "Password must be at least 10 characters")
+	}
+	if len(pw) > 72 {
+		return errValidation(field, "Password must be at most 72 bytes")
+	}
+	return nil
 }
 
 func ctxAuthUser(ctx context.Context) *authUser {
@@ -96,34 +110,47 @@ func (a *app) authenticate(r *http.Request) (string, error) {
 // users are rejected even when their token is still within its TTL.
 func (a *app) resolveUser(ctx context.Context, id string) (*authUser, error) {
 	var u authUser
-	var active int
-	err := a.db.QueryRowContext(ctx, `SELECT id, role, active FROM users WHERE id = ?`, id).
-		Scan(&u.ID, &u.Role, &active)
+	var active, mustChange int
+	err := a.db.QueryRowContext(ctx,
+		`SELECT id, role, active, must_change_password FROM users WHERE id = ?`, id).
+		Scan(&u.ID, &u.Role, &active, &mustChange)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && active == 0) {
 		return nil, errUnauthorized("Invalid or expired token")
 	}
 	if err != nil {
 		return nil, err
 	}
+	u.MustChange = mustChange != 0
 	return &u, nil
 }
 
+// protect requires a valid, active login.
 func (a *app) protect(h handlerFunc) http.HandlerFunc {
-	return a.guard(nil, h)
+	return a.guard(nil, false, h)
 }
 
 // requireRole is protect plus a role check. The check happens before the
 // handler runs, so no handler can forget it.
 func (a *app) requireRole(roles []string, h handlerFunc) http.HandlerFunc {
-	return a.guard(roles, h)
+	return a.guard(roles, false, h)
 }
 
-func (a *app) guard(roles []string, h handlerFunc) http.HandlerFunc {
+// protectPending is like protect but also allowed while a forced password
+// change is pending. Only change-password uses it.
+func (a *app) protectPending(h handlerFunc) http.HandlerFunc {
+	return a.guard(nil, true, h)
+}
+
+func (a *app) guard(roles []string, allowPending bool, h handlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uid, err := a.authenticate(r)
 		if err == nil {
 			var u *authUser
 			u, err = a.resolveUser(r.Context(), uid)
+			if err == nil && u.MustChange && !allowPending {
+				err = &apiError{status: http.StatusForbidden, code: "PASSWORD_CHANGE_REQUIRED",
+					message: "Your password was reset. Change it before continuing."}
+			}
 			if err == nil {
 				if roles != nil && !contains(roles, u.Role) {
 					err = errForbidden("You do not have permission to perform this action")
@@ -209,10 +236,10 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) error {
 		return errValidation("email", "Invalid email format")
 	}
 	var id, hash string
-	var active int
+	var active, mustChange int
 	err := a.db.QueryRowContext(r.Context(),
-		`SELECT id, password_hash, active FROM users WHERE email = ?`, email).
-		Scan(&id, &hash, &active)
+		`SELECT id, password_hash, active, must_change_password FROM users WHERE email = ?`, email).
+		Scan(&id, &hash, &active, &mustChange)
 	if errors.Is(err, sql.ErrNoRows) {
 		return errUnauthorized("Invalid credentials")
 	}
@@ -234,10 +261,49 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user":      u,
-		"token":     token,
-		"expiresIn": int(tokenTTL.Seconds()),
+		"user":               u,
+		"token":              token,
+		"expiresIn":          int(tokenTTL.Seconds()),
+		"mustChangePassword": mustChange != 0,
 	})
+	return nil
+}
+
+// changePassword lets the logged-in user set a new password. The current
+// password is required, so a stolen token alone cannot change it.
+func (a *app) changePassword(w http.ResponseWriter, r *http.Request) error {
+	var in struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := decodeBody(w, r, &in); err != nil {
+		return err
+	}
+	if err := checkPassword("newPassword", in.NewPassword); err != nil {
+		return err
+	}
+	if in.NewPassword == in.CurrentPassword {
+		return errValidation("newPassword", "New password must differ from the current one")
+	}
+	ctx := r.Context()
+	uid := currentUserID(r)
+	var hash string
+	if err := a.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, uid).Scan(&hash); err != nil {
+		return err
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.CurrentPassword)) != nil {
+		return errValidation("currentPassword", "Current password is incorrect")
+	}
+	newHash, err := bcrypt.GenerateFromPassword([]byte(in.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	if _, err := a.db.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = ? WHERE id = ?`,
+		string(newHash), nowStamp(), uid); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
 

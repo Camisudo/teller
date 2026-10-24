@@ -97,8 +97,11 @@ func (a *app) createUser(w http.ResponseWriter, r *http.Request) error {
 	if !contains(allRoles, role) {
 		return errValidation("role", "Role must be admin, sales_manager, sales_rep, or customer")
 	}
-	if in.Password == nil || len(*in.Password) < minPasswordLen {
-		return errValidation("password", "Password must be at least 10 characters")
+	if in.Password == nil {
+		return errValidation("password", "Password is required")
+	}
+	if err := checkPassword("password", *in.Password); err != nil {
+		return err
 	}
 	ctx := r.Context()
 	var n int
@@ -156,8 +159,10 @@ func (a *app) updateUser(w http.ResponseWriter, r *http.Request) error {
 			return errValidation("role", "Role must be admin, sales_manager, sales_rep, or customer")
 		}
 	}
-	if in.Password != nil && len(*in.Password) < minPasswordLen {
-		return errValidation("password", "Password must be at least 10 characters")
+	if in.Password != nil {
+		if err := checkPassword("password", *in.Password); err != nil {
+			return err
+		}
 	}
 	// Email is the login identifier and is not editable here.
 	if in.Email != nil && strings.ToLower(strings.TrimSpace(*in.Email)) != current.Email {
@@ -267,6 +272,40 @@ func (a *app) checkManager(ctx context.Context, id, managerID string) error {
 	if contains(below, managerID) {
 		return errValidation("managerId", "That would create a reporting loop")
 	}
+	return nil
+}
+
+// resetUserPassword sets a temporary password chosen by an admin. The target
+// must change it at next use: the guard rejects every other endpoint until then.
+// Admins change their own password through change-password, not here.
+func (a *app) resetUserPassword(w http.ResponseWriter, r *http.Request) error {
+	id := r.PathValue("id")
+	if id == currentUserID(r) {
+		return errConflict("Use change password to set your own password")
+	}
+	var in struct {
+		NewPassword string `json:"newPassword"`
+	}
+	if err := decodeBody(w, r, &in); err != nil {
+		return err
+	}
+	if err := checkPassword("newPassword", in.NewPassword); err != nil {
+		return err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(in.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	res, err := a.db.ExecContext(r.Context(),
+		`UPDATE users SET password_hash = ?, must_change_password = 1, updated_at = ? WHERE id = ?`,
+		string(hash), nowStamp(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errNotFound("User")
+	}
+	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
 
