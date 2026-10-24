@@ -56,7 +56,14 @@ func main() {
 		if _, err := a.bootstrapAdmin(pw, true); err != nil {
 			log.Fatalf("reset admin: %v", err)
 		}
-		fmt.Printf("Admin password reset. Email: %s  Password: %s\n", adminEmail, pw)
+		if os.Getenv("TELLER_ADMIN_PASSWORD") == "" {
+			if err := writeCredentialFile(credentialFilePath(dir), pw); err != nil {
+				log.Fatal(err)
+			}
+			fmt.Printf("Admin password reset. New password written to %s\n", credentialFilePath(dir))
+		} else {
+			fmt.Println("Admin password reset to the value of TELLER_ADMIN_PASSWORD.")
+		}
 		return
 	}
 
@@ -65,6 +72,7 @@ func main() {
 		log.Fatalf("check users: %v", err)
 	}
 	if count == 0 {
+		generated := os.Getenv("TELLER_ADMIN_PASSWORD") == ""
 		pw, err := chooseAdminPassword()
 		if err != nil {
 			log.Fatal(err)
@@ -73,8 +81,17 @@ func main() {
 			log.Fatalf("create admin: %v", err)
 		}
 		fmt.Println("First run: admin account created.")
-		fmt.Printf("  Email:    %s\n  Password: %s\n", adminEmail, pw)
-		fmt.Println("  Save this password now. Reset it later with: teller -reset-admin-password")
+		fmt.Printf("  Email:    %s\n", adminEmail)
+		if generated {
+			path := credentialFilePath(dir)
+			if err := writeCredentialFile(path, pw); err != nil {
+				log.Fatal(err)
+			}
+			fmt.Printf("  Password: written to %s\n", path)
+			fmt.Println("  Sign in, then delete that file.")
+		} else {
+			fmt.Println("  Password: taken from TELLER_ADMIN_PASSWORD")
+		}
 	}
 
 	ln, err := net.Listen("tcp", *addr)
