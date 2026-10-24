@@ -1,0 +1,7 @@
+dist/
+web/dist/
+data/
+*.db
+*.db-wal
+*.db-shm
+jwt.key
