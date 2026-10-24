@@ -37,6 +37,14 @@ type ctxUserKey struct{}
 type authUser struct {
 	ID   string
 	Role string
+	// Scope lists the user ids whose records this caller may see. nil means
+	// unrestricted (admin). Filled in by buildScope on every request.
+	Scope []string
+}
+
+func ctxAuthUser(ctx context.Context) *authUser {
+	u, _ := ctx.Value(ctxUserKey{}).(*authUser)
+	return u
 }
 
 type userRef struct {
@@ -46,16 +54,17 @@ type userRef struct {
 }
 
 type userOut struct {
-	ID          string `json:"id"`
-	Email       string `json:"email"`
-	FirstName   string `json:"firstName"`
-	LastName    string `json:"lastName"`
-	Role        string `json:"role"`
-	Avatar      string `json:"avatar"`
-	Active      bool   `json:"active"`
-	Permissions []any  `json:"permissions"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
+	ID          string  `json:"id"`
+	Email       string  `json:"email"`
+	FirstName   string  `json:"firstName"`
+	LastName    string  `json:"lastName"`
+	Role        string  `json:"role"`
+	Avatar      string  `json:"avatar"`
+	Active      bool    `json:"active"`
+	ManagerID   *string `json:"managerId"`
+	Permissions []any   `json:"permissions"`
+	CreatedAt   string  `json:"createdAt"`
+	UpdatedAt   string  `json:"updatedAt"`
 }
 
 func (a *app) issueToken(userID string) (string, error) {
@@ -119,6 +128,7 @@ func (a *app) guard(roles []string, h handlerFunc) http.HandlerFunc {
 				if roles != nil && !contains(roles, u.Role) {
 					err = errForbidden("You do not have permission to perform this action")
 				} else {
+					err = a.buildScope(r.Context(), u)
 					r = r.WithContext(context.WithValue(r.Context(), ctxUserKey{}, u))
 				}
 			}
@@ -153,14 +163,16 @@ func currentUserID(r *http.Request) string {
 	return ""
 }
 
-const userSelect = `SELECT id, email, first_name, last_name, role, avatar, active, created_at, updated_at`
+const userSelect = `SELECT id, email, first_name, last_name, role, avatar, active, manager_id, created_at, updated_at`
 const userCols = userSelect + ` FROM users`
 
 func scanUser(s rowScanner) (userOut, error) {
 	var u userOut
 	var active int
-	err := s.Scan(&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.Role, &u.Avatar, &active, &u.CreatedAt, &u.UpdatedAt)
+	var manager sql.NullString
+	err := s.Scan(&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.Role, &u.Avatar, &active, &manager, &u.CreatedAt, &u.UpdatedAt)
 	u.Active = active != 0
+	u.ManagerID = strPtr(manager)
 	u.Permissions = []any{}
 	return u, err
 }

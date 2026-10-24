@@ -95,7 +95,9 @@ func scanDeal(s rowScanner) (dealOut, error) {
 }
 
 func (a *app) getDeal(ctx context.Context, id string) (dealOut, error) {
-	row := a.db.QueryRowContext(ctx, dealCols+" "+dealFrom+" WHERE d.id = ? AND d.deleted_at IS NULL", id)
+	vis, va := andVisible(ctx, "d.owner_id")
+	row := a.db.QueryRowContext(ctx, dealCols+" "+dealFrom+" WHERE d.id = ? AND d.deleted_at IS NULL"+vis,
+		append([]any{id}, va...)...)
 	d, err := scanDeal(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return d, errNotFound("Deal")
@@ -106,8 +108,9 @@ func (a *app) getDeal(ctx context.Context, id string) (dealOut, error) {
 // dealBriefs lists deals with a WHERE clause on the deals table alias "d".
 func (a *app) dealBriefs(ctx context.Context, where string, arg any) ([]dealRef, error) {
 	rows, err := a.db.QueryContext(ctx,
-		`SELECT d.id, d.title, d.stage, d.value FROM deals d WHERE `+where+` AND d.deleted_at IS NULL
-		 ORDER BY d.created_at DESC LIMIT 50`, arg)
+		`SELECT d.id, d.title, d.stage, d.value FROM deals d WHERE `+where+` AND d.deleted_at IS NULL`+
+			scopeSQL(ctx, "d.owner_id")+` ORDER BY d.created_at DESC LIMIT 50`, append([]any{arg}, scopeArgs(ctx)...)...)
+
 	if err != nil {
 		return nil, err
 	}
@@ -225,6 +228,7 @@ func (a *app) listDeals(w http.ResponseWriter, r *http.Request) error {
 		where = append(where, "d.owner_id = ?")
 		args = append(args, owner)
 	}
+	where, args = addVisible(r.Context(), where, args, "d.owner_id")
 	for _, f := range []struct{ key, op string }{{"minValue", ">="}, {"maxValue", "<="}} {
 		if v := q.Get(f.key); v != "" {
 			n, err := strconv.ParseFloat(v, 64)
@@ -390,8 +394,9 @@ func (a *app) updateDeal(w http.ResponseWriter, r *http.Request) error {
 func (a *app) deleteDeal(w http.ResponseWriter, r *http.Request) error {
 	now := nowStamp()
 	res, err := a.db.ExecContext(r.Context(),
-		`UPDATE deals SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
-		now, now, r.PathValue("id"))
+		`UPDATE deals SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`+
+			scopeSQL(r.Context(), "owner_id"),
+		append([]any{now, now, r.PathValue("id")}, scopeArgs(r.Context())...)...)
 	if err != nil {
 		return err
 	}
@@ -413,11 +418,11 @@ func (a *app) getDealDetail(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	notes, _, err := a.listNotes(ctx, " WHERE n.deal_id = ?", []any{id}, " ORDER BY n.created_at DESC, n.rowid DESC", pageParams{1, 50})
+	notes, _, err := a.listNotes(ctx, " WHERE n.deal_id = ?"+scopeSQL(ctx, "n.author_id"), append([]any{id}, scopeArgs(ctx)...), " ORDER BY n.created_at DESC, n.rowid DESC", pageParams{1, 50})
 	if err != nil {
 		return err
 	}
-	acts, _, err := a.listActivities(ctx, " WHERE a.deal_id = ?", []any{id}, " ORDER BY a.created_at DESC, a.rowid DESC", pageParams{1, 50})
+	acts, _, err := a.listActivities(ctx, " WHERE a.deal_id = ?"+scopeSQL(ctx, "a.actor_id"), append([]any{id}, scopeArgs(ctx)...), " ORDER BY a.created_at DESC, a.rowid DESC", pageParams{1, 50})
 	if err != nil {
 		return err
 	}

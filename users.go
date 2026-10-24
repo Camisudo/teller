@@ -16,6 +16,7 @@ type userInput struct {
 	LastName  *string `json:"lastName"`
 	Role      *string `json:"role"`
 	Active    *bool   `json:"active"`
+	ManagerID *string `json:"managerId"`
 	Password  *string `json:"password"`
 }
 
@@ -113,10 +114,17 @@ func (a *app) createUser(w http.ResponseWriter, r *http.Request) error {
 	}
 	id := newID()
 	now := nowStamp()
+	var mgr any
+	if in.ManagerID != nil && *in.ManagerID != "" {
+		if err := a.checkManager(ctx, id, *in.ManagerID); err != nil {
+			return err
+		}
+		mgr = *in.ManagerID
+	}
 	_, err = a.db.ExecContext(ctx,
-		`INSERT INTO users (id, email, password_hash, first_name, last_name, role, active, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-		id, email, string(hash), first, last, role, now, now)
+		`INSERT INTO users (id, email, password_hash, first_name, last_name, role, active, manager_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+		id, email, string(hash), first, last, role, mgr, now, now)
 	if err != nil {
 		return err
 	}
@@ -157,6 +165,11 @@ func (a *app) updateUser(w http.ResponseWriter, r *http.Request) error {
 	}
 	if in.FirstName != nil && strings.TrimSpace(*in.FirstName) == "" {
 		return errValidation("firstName", "First name is required")
+	}
+	if in.ManagerID != nil && *in.ManagerID != "" {
+		if err := a.checkManager(ctx, id, *in.ManagerID); err != nil {
+			return err
+		}
 	}
 
 	self := currentUserID(r) == id
@@ -202,6 +215,10 @@ func (a *app) updateUser(w http.ResponseWriter, r *http.Request) error {
 		sets = append(sets, "active = ?")
 		args = append(args, boolInt(newActive))
 	}
+	if in.ManagerID != nil {
+		sets = append(sets, "manager_id = ?")
+		args = append(args, nilIfEmpty(*in.ManagerID))
+	}
 	if in.Password != nil {
 		hash, err := bcrypt.GenerateFromPassword([]byte(*in.Password), bcrypt.DefaultCost)
 		if err != nil {
@@ -222,6 +239,34 @@ func (a *app) updateUser(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeJSON(w, http.StatusOK, u)
+	return nil
+}
+
+// checkManager validates a proposed manager for user id: the manager must exist
+// and be active, cannot be the user, and cannot sit below the user in the
+// reporting tree (that would form a cycle).
+func (a *app) checkManager(ctx context.Context, id, managerID string) error {
+	if managerID == id {
+		return errValidation("managerId", "A user cannot manage themselves")
+	}
+	var active int
+	err := a.db.QueryRowContext(ctx, `SELECT active FROM users WHERE id = ?`, managerID).Scan(&active)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errValidation("managerId", "Manager not found")
+	}
+	if err != nil {
+		return err
+	}
+	if active == 0 {
+		return errValidation("managerId", "Manager is deactivated")
+	}
+	below, err := a.subtree(ctx, id)
+	if err != nil {
+		return err
+	}
+	if contains(below, managerID) {
+		return errValidation("managerId", "That would create a reporting loop")
+	}
 	return nil
 }
 

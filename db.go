@@ -133,6 +133,10 @@ func migrate(db *sql.DB) error {
 	if err := ensureColumn(db, "users", "active", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
+	// manager_id links a rep to their manager. NULL means no manager.
+	if err := ensureColumn(db, "users", "manager_id", "TEXT"); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -87,7 +87,9 @@ func scanContact(s rowScanner) (contactOut, error) {
 }
 
 func (a *app) getContact(ctx context.Context, id string) (contactOut, error) {
-	row := a.db.QueryRowContext(ctx, contactCols+" "+contactFrom+" WHERE c.id = ? AND c.deleted_at IS NULL", id)
+	vis, va := andVisible(ctx, "c.owner_id")
+	row := a.db.QueryRowContext(ctx, contactCols+" "+contactFrom+" WHERE c.id = ? AND c.deleted_at IS NULL"+vis,
+		append([]any{id}, va...)...)
 	c, err := scanContact(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, errNotFound("Contact")
@@ -95,9 +97,12 @@ func (a *app) getContact(ctx context.Context, id string) (contactOut, error) {
 	return c, err
 }
 
+// contactExists reports whether a live contact with this id is visible to the caller.
 func (a *app) contactExists(ctx context.Context, id string) (bool, error) {
+	vis, va := andVisible(ctx, "owner_id")
 	var n int
-	err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM contacts WHERE id = ? AND deleted_at IS NULL`, id).Scan(&n)
+	err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM contacts WHERE id = ? AND deleted_at IS NULL`+vis,
+		append([]any{id}, va...)...).Scan(&n)
 	return n > 0, err
 }
 
@@ -200,6 +205,7 @@ func (a *app) listContacts(w http.ResponseWriter, r *http.Request) error {
 		where = append(where, "c.owner_id = ?")
 		args = append(args, owner)
 	}
+	where, args = addVisible(r.Context(), where, args, "c.owner_id")
 	if tags := csvParam(r, "tags"); len(tags) > 0 {
 		where = append(where, "EXISTS (SELECT 1 FROM json_each(c.tags) WHERE json_each.value IN ("+placeholders(len(tags))+"))")
 		args = append(args, toAny(tags)...)
@@ -346,9 +352,10 @@ func (a *app) updateContact(w http.ResponseWriter, r *http.Request) error {
 
 func (a *app) deleteContact(w http.ResponseWriter, r *http.Request) error {
 	now := nowStamp()
+	vis, va := andVisible(r.Context(), "owner_id")
 	res, err := a.db.ExecContext(r.Context(),
-		`UPDATE contacts SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
-		now, now, r.PathValue("id"))
+		`UPDATE contacts SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`+vis,
+		append([]any{now, now, r.PathValue("id")}, va...)...)
 	if err != nil {
 		return err
 	}
@@ -374,11 +381,11 @@ func (a *app) getContactDetail(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	notes, _, err := a.listNotes(ctx, " WHERE n.contact_id = ?", []any{id}, " ORDER BY n.created_at DESC, n.rowid DESC", pageParams{1, 50})
+	notes, _, err := a.listNotes(ctx, " WHERE n.contact_id = ?"+scopeSQL(ctx, "n.author_id"), append([]any{id}, scopeArgs(ctx)...), " ORDER BY n.created_at DESC, n.rowid DESC", pageParams{1, 50})
 	if err != nil {
 		return err
 	}
-	acts, _, err := a.listActivities(ctx, " WHERE a.contact_id = ?", []any{id}, " ORDER BY a.created_at DESC, a.rowid DESC", pageParams{1, 50})
+	acts, _, err := a.listActivities(ctx, " WHERE a.contact_id = ?"+scopeSQL(ctx, "a.actor_id"), append([]any{id}, scopeArgs(ctx)...), " ORDER BY a.created_at DESC, a.rowid DESC", pageParams{1, 50})
 	if err != nil {
 		return err
 	}

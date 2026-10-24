@@ -123,7 +123,8 @@ func scanTask(s rowScanner) (taskOut, error) {
 }
 
 func (a *app) getTask(ctx context.Context, id string) (taskOut, error) {
-	row := a.db.QueryRowContext(ctx, taskCols+" "+taskFrom+" WHERE t.id = ?", id)
+	vis, va := andVisible(ctx, "t.assigned_to_id")
+	row := a.db.QueryRowContext(ctx, taskCols+" "+taskFrom+" WHERE t.id = ?"+vis, append([]any{id}, va...)...)
 	t, err := scanTask(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return t, errNotFound("Task")
@@ -134,7 +135,8 @@ func (a *app) getTask(ctx context.Context, id string) (taskOut, error) {
 // taskBriefs lists a contact's or deal's tasks; column is a fixed internal name.
 func (a *app) taskBriefs(ctx context.Context, column, id string) ([]taskBrief, error) {
 	rows, err := a.db.QueryContext(ctx,
-		`SELECT id, title, status, due_date FROM tasks WHERE `+column+` = ? ORDER BY due_date LIMIT 50`, id)
+		`SELECT id, title, status, due_date FROM tasks WHERE `+column+` = ?`+
+			scopeSQL(ctx, "assigned_to_id")+` ORDER BY due_date LIMIT 50`, append([]any{id}, scopeArgs(ctx)...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -225,9 +227,10 @@ func (a *app) checkLinks(ctx context.Context, contactID, dealID string) error {
 		}
 	}
 	if dealID != "" {
+		vis, va := andVisible(ctx, "owner_id")
 		var n int
 		if err := a.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM deals WHERE id = ? AND deleted_at IS NULL`, dealID).Scan(&n); err != nil {
+			`SELECT COUNT(*) FROM deals WHERE id = ? AND deleted_at IS NULL`+vis, append([]any{dealID}, va...)...).Scan(&n); err != nil {
 			return err
 		}
 		if n == 0 {
@@ -281,6 +284,7 @@ func (a *app) listTasks(w http.ResponseWriter, r *http.Request) error {
 		where = append(where, "t.assigned_to_id = ?")
 		args = append(args, assignee)
 	}
+	where, args = addVisible(r.Context(), where, args, "t.assigned_to_id")
 	if from := q.Get("dueDateFrom"); from != "" {
 		if from == "today" {
 			from = todayStamp()
@@ -363,6 +367,9 @@ func (a *app) createTask(w http.ResponseWriter, r *http.Request) error {
 	}
 	if err := a.checkLinks(ctx, t.contactID, t.dealID); err != nil {
 		return err
+	}
+	if !inScope(ctx, assignee) {
+		return errForbidden("You can only assign tasks to people in your team")
 	}
 
 	id := newID()
@@ -450,6 +457,9 @@ func (a *app) updateTask(w http.ResponseWriter, r *http.Request) error {
 	if err := a.checkLinks(ctx, cur.contactID, cur.dealID); err != nil {
 		return err
 	}
+	if !inScope(ctx, cur.AssignedTo.ID) {
+		return errForbidden("You can only assign tasks to people in your team")
+	}
 
 	actor := currentUserID(r)
 	now := nowStamp()
@@ -503,6 +513,9 @@ func (a *app) updateTask(w http.ResponseWriter, r *http.Request) error {
 func (a *app) deleteTask(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	if _, err := a.getTask(ctx, id); err != nil {
+		return err
+	}
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

@@ -50,19 +50,22 @@ func (a *app) dashboardMetrics(w http.ResponseWriter, r *http.Request) error {
 	}
 	out.ByStage = map[string]stageMetric{}
 
-	if err := a.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM contacts WHERE deleted_at IS NULL`).Scan(&out.Summary.TotalContacts); err != nil {
+	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM contacts WHERE deleted_at IS NULL`+
+		scopeSQL(ctx, "owner_id"), scopeArgs(ctx)...).Scan(&out.Summary.TotalContacts); err != nil {
 		return err
 	}
+
 	if err := a.db.QueryRowContext(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(value), 0) FROM deals
-		 WHERE deleted_at IS NULL AND stage NOT IN ('closed_won', 'closed_lost')`).
+		 WHERE deleted_at IS NULL AND stage NOT IN ('closed_won', 'closed_lost')`+scopeSQL(ctx, "owner_id"),
+		scopeArgs(ctx)...).
 		Scan(&out.Summary.ActiveDeals, &out.Summary.TotalPipelineValue); err != nil {
 		return err
 	}
 	if err := a.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM deals WHERE deleted_at IS NULL AND stage = 'closed_won'
-		 AND closed_date >= ?`, monthStart).Scan(&out.Summary.ClosedThisMonth); err != nil {
+		 AND closed_date >= ?`+scopeSQL(ctx, "owner_id"), append([]any{monthStart}, scopeArgs(ctx)...)...).
+		Scan(&out.Summary.ClosedThisMonth); err != nil {
 		return err
 	}
 
@@ -71,7 +74,8 @@ func (a *app) dashboardMetrics(w http.ResponseWriter, r *http.Request) error {
 		`SELECT
 		   COALESCE(SUM(CASE WHEN stage = 'closed_won' THEN 1 ELSE 0 END), 0),
 		   COALESCE(SUM(CASE WHEN stage = 'closed_lost' THEN 1 ELSE 0 END), 0)
-		 FROM deals WHERE deleted_at IS NULL AND closed_date >= ?`, since).Scan(&won, &lost); err != nil {
+		 FROM deals WHERE deleted_at IS NULL AND closed_date >= ?`+scopeSQL(ctx, "owner_id"),
+		append([]any{since}, scopeArgs(ctx)...)...).Scan(&won, &lost); err != nil {
 		return err
 	}
 	if won+lost > 0 {
@@ -80,7 +84,8 @@ func (a *app) dashboardMetrics(w http.ResponseWriter, r *http.Request) error {
 
 	rows, err := a.db.QueryContext(ctx,
 		`SELECT stage, COUNT(*), COALESCE(SUM(value), 0) FROM deals
-		 WHERE deleted_at IS NULL AND created_at >= ? GROUP BY stage`, since)
+		 WHERE deleted_at IS NULL AND created_at >= ?`+scopeSQL(ctx, "owner_id")+` GROUP BY stage`,
+		append([]any{since}, scopeArgs(ctx)...)...)
 	if err != nil {
 		return err
 	}
@@ -99,14 +104,15 @@ func (a *app) dashboardMetrics(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	top, _, err := queryPage(ctx, a.db, dealCols, dealFrom,
-		" WHERE d.deleted_at IS NULL AND d.stage NOT IN ('closed_won', 'closed_lost')",
-		" ORDER BY d.value DESC, d.id ASC", nil, pageParams{1, 5}, scanDeal)
+		" WHERE d.deleted_at IS NULL AND d.stage NOT IN ('closed_won', 'closed_lost')"+scopeSQL(ctx, "d.owner_id"),
+		" ORDER BY d.value DESC, d.id ASC", scopeArgs(ctx), pageParams{1, 5}, scanDeal)
 	if err != nil {
 		return err
 	}
 	out.TopDeals = top
 
-	acts, _, err := a.listActivities(ctx, " WHERE 1=1", nil, " ORDER BY a.created_at DESC, a.rowid DESC", pageParams{1, 10})
+	acts, _, err := a.listActivities(ctx, " WHERE 1=1"+scopeSQL(ctx, "a.actor_id"), scopeArgs(ctx),
+		" ORDER BY a.created_at DESC, a.rowid DESC", pageParams{1, 10})
 	if err != nil {
 		return err
 	}

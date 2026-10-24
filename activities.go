@@ -148,6 +148,8 @@ func (a *app) listActivitiesHandler(w http.ResponseWriter, r *http.Request) erro
 		args = append(args, to)
 	}
 
+	where, args = addVisible(r.Context(), where, args, "a.actor_id")
+
 	order, err := orderClause(r, activitySortCols, "createdAt", "desc", "a.rowid")
 	if err != nil {
 		return err
@@ -161,7 +163,9 @@ func (a *app) listActivitiesHandler(w http.ResponseWriter, r *http.Request) erro
 }
 
 func (a *app) getActivityHandler(w http.ResponseWriter, r *http.Request) error {
-	row := a.db.QueryRowContext(r.Context(), activityCols+" "+activityFrom+" WHERE a.id = ?", r.PathValue("id"))
+	vis, va := andVisible(r.Context(), "a.actor_id")
+	row := a.db.QueryRowContext(r.Context(), activityCols+" "+activityFrom+" WHERE a.id = ?"+vis,
+		append([]any{r.PathValue("id")}, va...)...)
 	item, err := scanActivity(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return errNotFound("Activity")
@@ -329,8 +333,9 @@ func (a *app) updateNote(w http.ResponseWriter, r *http.Request) error {
 	if in.Content == nil || strings.TrimSpace(*in.Content) == "" {
 		return errValidation("content", "Note content is required")
 	}
-	res, err := a.db.ExecContext(ctx, `UPDATE notes SET content = ?, updated_at = ? WHERE id = ?`,
-		strings.TrimSpace(*in.Content), nowStamp(), id)
+	res, err := a.db.ExecContext(ctx, `UPDATE notes SET content = ?, updated_at = ? WHERE id = ?`+
+		scopeSQL(ctx, "author_id"),
+		append([]any{strings.TrimSpace(*in.Content), nowStamp(), id}, scopeArgs(ctx)...)...)
 	if err != nil {
 		return err
 	}
@@ -346,7 +351,8 @@ func (a *app) updateNote(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (a *app) deleteNote(w http.ResponseWriter, r *http.Request) error {
-	res, err := a.db.ExecContext(r.Context(), `DELETE FROM notes WHERE id = ?`, r.PathValue("id"))
+	res, err := a.db.ExecContext(r.Context(), `DELETE FROM notes WHERE id = ?`+scopeSQL(r.Context(), "author_id"),
+		append([]any{r.PathValue("id")}, scopeArgs(r.Context())...)...)
 	if err != nil {
 		return err
 	}
