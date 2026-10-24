@@ -257,7 +257,8 @@ func (a *app) listContactNotes(w http.ResponseWriter, r *http.Request) error {
 	if strings.ToLower(r.URL.Query().Get("sortOrder")) == "asc" {
 		order = " ORDER BY n.created_at ASC, n.rowid ASC"
 	}
-	items, total, err := a.listNotes(r.Context(), " WHERE n.contact_id = ?", []any{cid}, order, p)
+	items, total, err := a.listNotes(r.Context(), " WHERE n.contact_id = ?"+scopeSQL(r.Context(), "n.author_id"),
+		append([]any{cid}, scopeArgs(r.Context())...), order, p)
 	if err != nil {
 		return err
 	}
