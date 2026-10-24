@@ -128,5 +128,39 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("%w (statement: %.60s)", err, strings.TrimSpace(stmt))
 		}
 	}
+	// Columns added after the first release. CREATE TABLE IF NOT EXISTS does not
+	// alter existing tables, so add them here when missing.
+	if err := ensureColumn(db, "users", "active", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func ensureColumn(db *sql.DB, table, column, decl string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
+	return err
 }

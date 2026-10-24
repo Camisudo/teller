@@ -19,7 +19,25 @@ const tokenTTL = time.Hour
 
 const adminEmail = "admin@teller.local"
 
+const minPasswordLen = 10
+
+const (
+	roleAdmin        = "admin"
+	roleSalesManager = "sales_manager"
+	roleSalesRep     = "sales_rep"
+	roleCustomer     = "customer"
+)
+
+var allRoles = []string{roleAdmin, roleSalesManager, roleSalesRep, roleCustomer}
+
 type ctxUserKey struct{}
+
+// authUser is the caller resolved from the database on every request, so a
+// role change or deactivation applies immediately, not at token expiry.
+type authUser struct {
+	ID   string
+	Role string
+}
 
 type userRef struct {
 	ID        string `json:"id"`
@@ -34,6 +52,7 @@ type userOut struct {
 	LastName    string `json:"lastName"`
 	Role        string `json:"role"`
 	Avatar      string `json:"avatar"`
+	Active      bool   `json:"active"`
 	Permissions []any  `json:"permissions"`
 	CreatedAt   string `json:"createdAt"`
 	UpdatedAt   string `json:"updatedAt"`
@@ -64,14 +83,50 @@ func (a *app) authenticate(r *http.Request) (string, error) {
 	return claims.Subject, nil
 }
 
+// resolveUser loads the caller's current role and active flag. Deactivated
+// users are rejected even when their token is still within its TTL.
+func (a *app) resolveUser(ctx context.Context, id string) (*authUser, error) {
+	var u authUser
+	var active int
+	err := a.db.QueryRowContext(ctx, `SELECT id, role, active FROM users WHERE id = ?`, id).
+		Scan(&u.ID, &u.Role, &active)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && active == 0) {
+		return nil, errUnauthorized("Invalid or expired token")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
 func (a *app) protect(h handlerFunc) http.HandlerFunc {
+	return a.guard(nil, h)
+}
+
+// requireRole is protect plus a role check. The check happens before the
+// handler runs, so no handler can forget it.
+func (a *app) requireRole(roles []string, h handlerFunc) http.HandlerFunc {
+	return a.guard(roles, h)
+}
+
+func (a *app) guard(roles []string, h handlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uid, err := a.authenticate(r)
+		if err == nil {
+			var u *authUser
+			u, err = a.resolveUser(r.Context(), uid)
+			if err == nil {
+				if roles != nil && !contains(roles, u.Role) {
+					err = errForbidden("You do not have permission to perform this action")
+				} else {
+					r = r.WithContext(context.WithValue(r.Context(), ctxUserKey{}, u))
+				}
+			}
+		}
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		r = r.WithContext(context.WithValue(r.Context(), ctxUserKey{}, uid))
 		if err := h(w, r); err != nil {
 			writeError(w, err)
 		}
@@ -86,21 +141,35 @@ func (a *app) handle(h handlerFunc) http.HandlerFunc {
 	}
 }
 
-func currentUserID(r *http.Request) string {
-	v, _ := r.Context().Value(ctxUserKey{}).(string)
-	return v
+func currentUser(r *http.Request) *authUser {
+	u, _ := r.Context().Value(ctxUserKey{}).(*authUser)
+	return u
 }
 
-const userCols = `SELECT id, email, first_name, last_name, role, avatar, created_at, updated_at FROM users`
+func currentUserID(r *http.Request) string {
+	if u := currentUser(r); u != nil {
+		return u.ID
+	}
+	return ""
+}
+
+const userSelect = `SELECT id, email, first_name, last_name, role, avatar, active, created_at, updated_at`
+const userCols = userSelect + ` FROM users`
+
+func scanUser(s rowScanner) (userOut, error) {
+	var u userOut
+	var active int
+	err := s.Scan(&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.Role, &u.Avatar, &active, &u.CreatedAt, &u.UpdatedAt)
+	u.Active = active != 0
+	u.Permissions = []any{}
+	return u, err
+}
 
 func (a *app) loadUser(ctx context.Context, id string) (userOut, error) {
-	var u userOut
-	err := a.db.QueryRowContext(ctx, userCols+" WHERE id = ?", id).Scan(
-		&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.Role, &u.Avatar, &u.CreatedAt, &u.UpdatedAt)
+	u, err := scanUser(a.db.QueryRowContext(ctx, userCols+" WHERE id = ?", id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return u, errNotFound("User")
 	}
-	u.Permissions = []any{}
 	return u, err
 }
 
@@ -128,8 +197,10 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) error {
 		return errValidation("email", "Invalid email format")
 	}
 	var id, hash string
-	err := a.db.QueryRowContext(r.Context(), `SELECT id, password_hash FROM users WHERE email = ?`, email).
-		Scan(&id, &hash)
+	var active int
+	err := a.db.QueryRowContext(r.Context(),
+		`SELECT id, password_hash, active FROM users WHERE email = ?`, email).
+		Scan(&id, &hash, &active)
 	if errors.Is(err, sql.ErrNoRows) {
 		return errUnauthorized("Invalid credentials")
 	}
@@ -138,6 +209,9 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) error {
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.Password)) != nil {
 		return errUnauthorized("Invalid credentials")
+	}
+	if active == 0 {
+		return errUnauthorized("This account is deactivated")
 	}
 	token, err := a.issueToken(id)
 	if err != nil {
@@ -196,7 +270,7 @@ func (a *app) bootstrapAdmin(password string, reset bool) (bool, error) {
 		return false, err
 	}
 	if exists > 0 {
-		_, err = a.db.ExecContext(ctx, `UPDATE users SET password_hash = ?, updated_at = ? WHERE email = ?`,
+		_, err = a.db.ExecContext(ctx, `UPDATE users SET password_hash = ?, active = 1, updated_at = ? WHERE email = ?`,
 			string(hash), now, adminEmail)
 		return false, err
 	}

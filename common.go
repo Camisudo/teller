@@ -40,6 +40,14 @@ func errValidation(field, msg string) error {
 	}
 }
 
+func errConflict(msg string) error {
+	return &apiError{status: http.StatusConflict, code: "CONFLICT", message: msg}
+}
+
+func errForbidden(msg string) error {
+	return &apiError{status: http.StatusForbidden, code: "FORBIDDEN", message: msg}
+}
+
 func errNotFound(what string) error {
 	return &apiError{status: http.StatusNotFound, code: "NOT_FOUND", message: what + " not found"}
 }
