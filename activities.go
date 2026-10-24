@@ -148,7 +148,7 @@ func (a *app) listActivitiesHandler(w http.ResponseWriter, r *http.Request) erro
 		args = append(args, to)
 	}
 
-	order, err := orderClause(r, activitySortCols, "createdAt", "desc", "a.id")
+	order, err := orderClause(r, activitySortCols, "createdAt", "desc", "a.rowid")
 	if err != nil {
 		return err
 	}
@@ -249,9 +249,9 @@ func (a *app) listContactNotes(w http.ResponseWriter, r *http.Request) error {
 	if !ok {
 		return errNotFound("Contact")
 	}
-	order := " ORDER BY n.created_at DESC, n.id DESC"
+	order := " ORDER BY n.created_at DESC, n.rowid DESC"
 	if strings.ToLower(r.URL.Query().Get("sortOrder")) == "asc" {
-		order = " ORDER BY n.created_at ASC, n.id ASC"
+		order = " ORDER BY n.created_at ASC, n.rowid ASC"
 	}
 	items, total, err := a.listNotes(r.Context(), " WHERE n.contact_id = ?", []any{cid}, order, p)
 	if err != nil {

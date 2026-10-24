@@ -106,7 +106,7 @@ func (a *app) dashboardMetrics(w http.ResponseWriter, r *http.Request) error {
 	}
 	out.TopDeals = top
 
-	acts, _, err := a.listActivities(ctx, " WHERE 1=1", nil, " ORDER BY a.created_at DESC", pageParams{1, 10})
+	acts, _, err := a.listActivities(ctx, " WHERE 1=1", nil, " ORDER BY a.created_at DESC, a.rowid DESC", pageParams{1, 10})
 	if err != nil {
 		return err
 	}

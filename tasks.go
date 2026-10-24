@@ -313,11 +313,11 @@ func (a *app) getTaskHandler(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	acts, _, err := a.listActivities(ctx, " WHERE a.task_id = ?", []any{id}, " ORDER BY a.created_at DESC", pageParams{1, 50})
+	acts, _, err := a.listActivities(ctx, " WHERE a.task_id = ?", []any{id}, " ORDER BY a.created_at DESC, a.rowid DESC", pageParams{1, 50})
 	if err != nil {
 		return err
 	}
-	notes, _, err := a.listNotes(ctx, " WHERE n.task_id = ?", []any{id}, " ORDER BY n.created_at DESC", pageParams{1, 50})
+	notes, _, err := a.listNotes(ctx, " WHERE n.task_id = ?", []any{id}, " ORDER BY n.created_at DESC, n.rowid DESC", pageParams{1, 50})
 	if err != nil {
 		return err
 	}
